@@ -1,0 +1,247 @@
+<!-- ./templates/index.html -->
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Phân loại & Trực quan hóa Giấc ngủ</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Roboto:wght@300;400;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+    <style>
+        .chart-container { position: relative; height: 400px; width: 100%; }
+        .spinner-border { vertical-align: -0.125em; }
+        .hidden { display: none !important; }
+    </style>
+</head>
+<body class="bg-light">
+    <div class="container mt-5 mb-5">
+        <div class="text-center mb-5">
+            <h1 class="display-5 fw-bold">Hệ thống Phân loại Giấc ngủ Tích hợp</h1>
+            <p class="lead text-muted">Chọn một epoch dữ liệu, xem trực quan và nhận kết quả dự đoán từ AI so với label gốc.</p>
+        </div>
+
+        <div class="row g-5">
+            <!-- Cột điều khiển -->
+            <div class="col-lg-5">
+                <div class="card shadow-sm">
+                    <div class="card-body p-4">
+                        <h4 class="card-title mb-3">Bảng điều khiển</h4>
+                        <div class="mb-3">
+                            <label for="file-selector" class="form-label">1. Chọn File Epoch (.edf)</label>
+                            <select class="form-select" id="file-selector">
+                                <option selected disabled>-- Vui lòng chọn một file --</option>
+                                {% if available_files %}
+                                    {% for file in available_files %}
+                                        <option value="{{ file }}">{{ file }}</option>
+                                    {% endfor %}
+                                {% else %}
+                                    <option disabled>Không tìm thấy file nào trong thư mục 'datasets'</option>
+                                {% endif %}
+                            </select>
+                        </div>
+                        
+                        <div class="d-grid gap-2">
+                            <button type="button" id="process-btn" class="btn btn-primary" disabled>
+                                <span id="btn-spinner" class="spinner-border spinner-border-sm hidden" role="status" aria-hidden="true"></span>
+                                <span id="btn-text">Tải Dữ liệu & Dự đoán</span>
+                            </button>
+                        </div>
+                         <div id="global-error" class="alert alert-danger mt-3 hidden"></div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Cột kết quả -->
+            <div class="col-lg-7">
+                <div class="card shadow-sm">
+                    <div class="card-body p-4">
+                        <h4 class="card-title mb-3">Kết quả Phân tích</h4>
+                        <div id="results-placeholder" class="alert alert-info text-center">
+                            Chọn file, sau đó nhấn nút để xem kết quả.
+                        </div>
+                        <div id="results-container" class="hidden"></div>
+                    </div>
+                </div>
+                
+                <!-- Cột Trực quan hóa -->
+                <div id="visualization-section" class="card shadow-sm mt-4 hidden">
+                    <div class="card-body p-4">
+                        <h4 class="card-title mb-3">Trực quan hóa Tín hiệu</h4>
+                        <h5 class="text-center text-muted mb-2">Biểu đồ tổng quan 3 kênh</h5>
+                        <div class="chart-container mb-4"><canvas id="signalChart"></canvas></div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/hammerjs@2.0.8"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-zoom@2.0.1/dist/chartjs-plugin-zoom.min.js"></script>
+
+    <script>
+        // --- DOM Elements ---
+        const fileSelector = document.getElementById('file-selector');
+        const processBtn = document.getElementById('process-btn');
+        const btnSpinner = document.getElementById('btn-spinner');
+        const btnText = document.getElementById('btn-text');
+        const resultsPlaceholder = document.getElementById('results-placeholder');
+        const resultsContainer = document.getElementById('results-container');
+        const vizSection = document.getElementById('visualization-section');
+        const globalError = document.getElementById('global-error');
+
+        let signalChart;
+        let currentSignalData = null;
+        
+        // --- Event Listeners ---
+        fileSelector.addEventListener('change', () => {
+            processBtn.disabled = false;
+        });
+
+        processBtn.addEventListener('click', handleProcessRequest);
+
+        // --- Functions ---
+        function setLoadingState(isLoading) {
+            if (isLoading) {
+                processBtn.disabled = true;
+                btnSpinner.classList.remove('hidden');
+                btnText.textContent = 'Đang xử lý...';
+                globalError.classList.add('hidden');
+            } else {
+                processBtn.disabled = false;
+                btnSpinner.classList.add('hidden');
+                btnText.textContent = 'Tải Dữ liệu & Dự đoán';
+            }
+        }
+
+        function showError(message) {
+            globalError.textContent = `Lỗi: ${message}`;
+            globalError.classList.remove('hidden');
+        }
+
+        async function handleProcessRequest() {
+            setLoadingState(true);
+            const filename = fileSelector.value;
+
+            try {
+                const response = await fetch('/get-epoch-data', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ filename }),
+                });
+                const data = await response.json();
+
+                if (!response.ok || !data.success) {
+                    throw new Error(data.error || 'Không thể tải dữ liệu epoch.');
+                }
+                
+                currentSignalData = data.signals;
+                await handlePrediction(currentSignalData, filename);
+
+            } catch (error) {
+                showError(error.message);
+                setLoadingState(false);
+            }
+        }
+        
+        async function handlePrediction(signals, filename) {
+             try {
+                const response = await fetch('/predict', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ ...signals, filename }),
+                });
+                const data = await response.json();
+
+                if (!response.ok || !data.success) {
+                    throw new Error(data.error || 'Lỗi khi thực hiện dự đoán.');
+                }
+                
+                displayPredictionResults(data.prediction_results, data.ground_truth_key, data.ground_truth_full);
+                drawSignalChart(signals);
+                
+                resultsPlaceholder.classList.add('hidden');
+                resultsContainer.classList.remove('hidden');
+                vizSection.classList.remove('hidden');
+                
+             } catch(error) {
+                showError(error.message);
+             } finally {
+                setLoadingState(false);
+             }
+        }
+
+        function displayPredictionResults(results, ground_truth_key, ground_truth_full) {
+            resultsContainer.innerHTML = ''; 
+            for (const modelKey in results) {
+                const result = results[modelKey];
+
+                const is_correct = result.prediction_key === ground_truth_key;
+                const result_color_class = is_correct ? 'text-success' : 'text-danger';
+                const icon = is_correct 
+                    ? `<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" fill="currentColor" class="bi bi-check-circle-fill" viewBox="0 0 16 16"><path d="M16 8A8 8 0 1 1 0 8a8 8 0 0 1 16 0zm-3.97-3.03a.75.75 0 0 0-1.08.022L7.477 9.417 5.384 7.323a.75.75 0 0 0-1.06 1.06L6.97 11.03a.75.75 0 0 0 1.079-.02l3.992-4.99a.75.75 0 0 0-.01-1.05z"/></svg>`
+                    : `<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" fill="currentColor" class="bi bi-x-circle-fill" viewBox="0 0 16 16"><path d="M16 8A8 8 0 1 1 0 8a8 8 0 0 1 16 0zM5.354 4.646a.5.5 0 1 0-.708.708L7.293 8l-2.647 2.646a.5.5 0 0 0 .708.708L8 8.707l2.646 2.647a.5.5 0 0 0 .708-.708L8.707 8l2.647-2.646a.5.5 0 0 0-.708-.708L8 7.293 5.354 4.646z"/></svg>`;
+
+                let probabilitiesHtml = '';
+                for(const stage in result.probabilities) {
+                    probabilitiesHtml += `
+                        <li class="list-group-item d-flex justify-content-between align-items-center">
+                            ${stage}
+                            <span class="badge bg-primary rounded-pill">${result.probabilities[stage]}</span>
+                        </li>`;
+                }
+
+                const resultCardHtml = `
+                    <div class="card mb-3">
+                        <div class="card-header fw-bold">${result.name}</div>
+                        <div class="card-body">
+                            <div class="row align-items-center text-center">
+                                <div class="col">
+                                    <h6 class="text-muted">DỰ ĐOÁN CỦA AI</h6>
+                                    <h5 class="display-6 ${result_color_class}">${result.prediction}</h5>
+                                </div>
+                                <div class="col-2 ${result_color_class}">
+                                    ${icon}
+                                </div>
+                                <div class="col">
+                                    <h6 class="text-muted">LABEL GỐC</h6>
+                                    <h5 class="display-6">${ground_truth_full}</h5>
+                                </div>
+                            </div>
+                            <hr>
+                            <p class="card-text text-muted">Phân phối xác suất:</p>
+                            <ul class="list-group list-group-flush">${probabilitiesHtml}</ul>
+                        </div>
+                    </div>`;
+                resultsContainer.innerHTML += resultCardHtml.trim();
+            }
+        }
+
+        function drawSignalChart(signals) {
+            if (signalChart) signalChart.destroy();
+            const ctx = document.getElementById('signalChart').getContext('2d');
+            const labels = Array.from({ length: 3000 }, (_, i) => i + 1); 
+            signalChart = new Chart(ctx, {
+                type: 'line', 
+                data: { labels, datasets: [ 
+                        { label: 'EEG', data: signals.eeg, borderColor: 'rgba(54, 162, 235, 1)', borderWidth: 1, pointRadius: 0 }, 
+                        { label: 'EOG', data: signals.eog, borderColor: 'rgba(255, 99, 132, 1)', borderWidth: 1, pointRadius: 0 }, 
+                        { label: 'EMG', data: signals.emg, borderColor: 'rgba(75, 192, 192, 1)', borderWidth: 1, pointRadius: 0 }
+                    ] }, 
+                options: { 
+                    responsive: true, maintainAspectRatio: false, animation: false, 
+                    scales: { 
+                        x: { title: { display: true, text: 'Điểm dữ liệu' } }, 
+                        y: { title: { display: true, text: 'Amplitude' } } 
+                    },
+                    plugins: { 
+                        legend: { position: 'top' },
+                        zoom: { pan: { enabled: true, mode: 'x' }, zoom: { wheel: { enabled: true }, pinch: { enabled: true }, mode: 'x' } } 
+                    }
+                }
+            });
+        }
+    </script>
+</body>
+</html>

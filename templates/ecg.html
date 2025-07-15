@@ -1,0 +1,173 @@
+<!-- ./templates/ecg.html -->
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Trực quan hóa ECG</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Roboto:wght@300;400;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+    <style>
+        .chart-container {
+            position: relative;
+            height: 400px; /* Chiều cao cố định cho biểu đồ */
+            width: 100%;
+        }
+        #ecgChart {
+            background-color: #f8f9fa;
+            border-radius: 5px;
+            border: 1px solid #dee2e6;
+        }
+    </style>
+</head>
+<body class="bg-light">
+
+    <div class="container mt-5 mb-5">
+        <div class="text-center mb-5">
+            <h1 class="display-5 fw-bold">Trình trực quan hóa tín hiệu ECG</h1>
+            <p class="lead text-muted">Tải lên file ECG từ bộ dữ liệu PhysioNet (.dat & .hea) để xem biểu đồ và các đỉnh R-peak.</p>
+            <a href="/" class="btn btn-outline-primary mt-2">Quay lại trang phân loại giấc ngủ</a>
+        </div>
+
+        <div class="row">
+            <div class="col-md-8 mx-auto">
+                <div class="card shadow-sm">
+                    <div class="card-body p-4">
+                        <h4 class="card-title mb-4">Tải lên File ECG</h4>
+                        <form method="POST" enctype="multipart/form-data">
+                            <div class="row g-3 align-items-center">
+                                <div class="col">
+                                    <label for="dat_file" class="form-label">File Tín hiệu (.dat)</label>
+                                    <input class="form-control" type="file" id="dat_file" name="dat_file" required>
+                                </div>
+                                <div class="col">
+                                    <label for="hea_file" class="form-label">File Header (.hea)</label>
+                                    <input class="form-control" type="file" id="hea_file" name="hea_file" required>
+                                </div>
+                                <div class="col-auto align-self-end">
+                                    <button type="submit" class="btn btn-success">Trực quan hóa</button>
+                                </div>
+                            </div>
+                        </form>
+                    </div>
+                </div>
+
+                <!-- Vùng hiển thị lỗi và biểu đồ -->
+                <div class="card shadow-sm mt-4">
+                    <div class="card-body p-4">
+                        <h4 class="card-title mb-3">Biểu đồ Tín hiệu</h4>
+                        {% if error %}
+                        <div class="alert alert-danger">{{ error }}</div>
+                        {% endif %}
+                        
+                        <div class="chart-container">
+                            <canvas id="ecgChart"></canvas>
+                        </div>
+                        
+                        {% if not chart_data %}
+                        <div class="alert alert-info mt-3 text-center">
+                            Biểu đồ sẽ được hiển thị ở đây sau khi bạn tải file lên.
+                        </div>
+                        {% else %}
+                        <div class="alert alert-secondary mt-3 text-center">
+                            <strong>Mẹo:</strong> Dùng con lăn chuột để <strong>phóng to/thu nhỏ</strong>. Giữ chuột trái và kéo để <strong>di chuyển</strong> biểu đồ.
+                        </div>
+                        {% endif %}
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Chart.js và plugin zoom -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/hammerjs@2.0.8"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-zoom@2.0.1/dist/chartjs-plugin-zoom.min.js"></script>
+
+    <script>
+        const chartDataJSON = '{{ chart_data | safe }}';
+        if (chartDataJSON && chartDataJSON !== 'null') {
+            const data = JSON.parse(chartDataJSON);
+            const ctx = document.getElementById('ecgChart').getContext('2d');
+
+            new Chart(ctx, {
+                type: 'line',
+                data: {
+                    labels: data.time,
+                    datasets: [
+                        {
+                            label: `${data.signal_name} (${data.unit})`,
+                            data: data.signal,
+                            borderColor: 'rgba(54, 162, 235, 1)',
+                            borderWidth: 1.5,
+                            pointRadius: 0, // Không hiển thị điểm trên đường line
+                            tension: 0.1
+                        },
+                        {
+                            label: 'R-Peaks',
+                            data: data.r_peaks_time.map((t, i) => ({ x: t, y: data.r_peaks_value[i] })),
+                            pointBackgroundColor: 'rgba(255, 99, 132, 1)',
+                            pointRadius: 5,
+                            pointHoverRadius: 7,
+                            type: 'scatter', // Loại biểu đồ là scatter cho các điểm R-peak
+                        }
+                    ]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    scales: {
+                        x: {
+                            title: {
+                                display: true,
+                                text: 'Thời gian (giây)'
+                            },
+                            grid: {
+                                color: 'rgba(0, 0, 0, 0.05)'
+                            }
+                        },
+                        y: {
+                            title: {
+                                display: true,
+                                text: `Amplitude (${data.unit})`
+                            },
+                             grid: {
+                                color: 'rgba(0, 0, 0, 0.05)'
+                            }
+                        }
+                    },
+                    plugins: {
+                        legend: {
+                            position: 'top',
+                        },
+                        title: {
+                            display: true,
+                            text: `Tín hiệu ECG - ${data.signal_name}`,
+                            font: {
+                                size: 16
+                            }
+                        },
+                        // Cấu hình plugin zoom
+                        zoom: {
+                            pan: {
+                                enabled: true,
+                                mode: 'x', // Chỉ pan theo trục x
+                            },
+                            zoom: {
+                                wheel: {
+                                    enabled: true, // Cho phép zoom bằng con lăn chuột
+                                },
+                                pinch: {
+                                    enabled: true // Cho phép zoom trên màn hình cảm ứng
+                                },
+                                mode: 'x', // Chỉ zoom theo trục x
+                            }
+                        }
+                    }
+                }
+            });
+        }
+    </script>
+</body>
+</html>

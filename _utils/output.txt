@@ -1,0 +1,925 @@
+
+===== ./check_channel.py =====
+# check_channels.py
+import mne
+import os
+
+# Đường dẫn đến thư mục chứa file EDF
+DATASET_DIR = "datasets"
+
+# Lấy file EDF đầu tiên trong thư mục để kiểm tra
+# (Giả định rằng tất cả các file trong thư mục đều có cùng cấu trúc kênh)
+try:
+    first_file = [f for f in os.listdir(DATASET_DIR) if f.endswith('.edf')][0]
+    filepath = os.path.join(DATASET_DIR, first_file)
+
+    print(f"Đang kiểm tra các kênh trong file: {filepath}\n")
+
+    # Đọc file EDF mà không cần tải dữ liệu vào bộ nhớ
+    raw = mne.io.read_raw_edf(filepath, preload=False, verbose='ERROR')
+
+    # In ra danh sách các tên kênh
+    print("Các tên kênh có sẵn trong file là:")
+    print(raw.ch_names)
+
+except IndexError:
+    print(f"Lỗi: Không tìm thấy file .edf nào trong thư mục '{DATASET_DIR}'.")
+except Exception as e:
+    print(f"Đã xảy ra lỗi: {e}")
+
+===== ./model.py =====
+# ./model.py
+
+import torch
+import torch.nn as nn
+
+#======================================================================
+# Các class định nghĩa kiến trúc cho mô hình Transformer (3 kênh)
+#======================================================================
+
+class PositionalEncoding(nn.Module):
+    """Thêm thông tin vị trí vào embedding đầu vào."""
+    def __init__(self, d_model, max_len=5000):
+        super(PositionalEncoding, self).__init__()
+        pe = torch.zeros(max_len, d_model)
+        position = torch.arange(0, max_len, dtype=torch.float).unsqueeze(1)
+        div_term = torch.exp(torch.arange(0, d_model, 2).float() * (-torch.log(torch.tensor(10000.0)) / d_model))
+        pe[:, 0::2] = torch.sin(position * div_term)
+        pe[:, 1::2] = torch.cos(position * div_term)
+        pe = pe.unsqueeze(0)
+        self.register_buffer('pe', pe)
+
+    def forward(self, x):
+        x = x + self.pe[:, :x.size(1)]
+        return x
+
+class TransformerBranch(nn.Module):
+    """Một nhánh Transformer để xử lý một kênh tín hiệu."""
+    def __init__(self, input_size=3000, patch_size=30, d_model=128, num_heads=8, num_layers=4):
+        super(TransformerBranch, self).__init__()
+        self.patch_size = patch_size
+        self.d_model = d_model
+        if input_size % patch_size != 0:
+            raise ValueError(f"input_size ({input_size}) phải chia hết cho patch_size ({patch_size}).")
+        self.n_patches = input_size // patch_size
+        self.embedding = nn.Linear(patch_size, d_model)
+        self.pos_encoder = PositionalEncoding(d_model=d_model, max_len=self.n_patches)
+        encoder_layers = nn.TransformerEncoderLayer(d_model=d_model, nhead=num_heads, dim_feedforward=256, dropout=0.1, activation='relu', batch_first=True)
+        self.transformer_encoder = nn.TransformerEncoder(encoder_layers, num_layers=num_layers)
+
+    def forward(self, x):
+        x = x.unfold(dimension=2, size=self.patch_size, step=self.patch_size)
+        x = x.squeeze(1)
+        x = self.embedding(x)
+        x = self.pos_encoder(x)
+        x = self.transformer_encoder(x)
+        x = x.mean(dim=1)
+        return x
+
+class MultiChannelSleepTransformer(nn.Module):
+    """Mô hình chính, kết hợp 3 nhánh Transformer."""
+    def __init__(self, input_size=3000, patch_size=30, d_model=128, num_heads=8, num_layers=6, num_classes=5):
+        super(MultiChannelSleepTransformer, self).__init__()
+        self.eeg_branch = TransformerBranch(input_size, patch_size, d_model, num_heads, num_layers)
+        self.eog_branch = TransformerBranch(input_size, patch_size, d_model, num_heads, num_layers)
+        self.emg_branch = TransformerBranch(input_size, patch_size, d_model, num_heads, num_layers)
+        self.fusion_dim = d_model * 3
+        self.classifier = nn.Sequential(
+            nn.LayerNorm(self.fusion_dim),
+            nn.Linear(self.fusion_dim, 256), nn.ReLU(), nn.Dropout(0.5),
+            nn.Linear(256, num_classes)
+        )
+
+    def forward(self, x):
+        eeg_embedding = self.eeg_branch(x[:, 0:1, :])
+        eog_embedding = self.eog_branch(x[:, 1:2, :])
+        emg_embedding = self.emg_branch(x[:, 2:3, :])
+        fused_embedding = torch.cat([eeg_embedding, eog_embedding, emg_embedding], dim=1)
+        output = self.classifier(fused_embedding)
+        return output
+
+#======================================================================
+# Các class định nghĩa kiến trúc cho mô hình DeepSleepNet (3 kênh)
+#======================================================================
+class DeepSleepNetBranch(nn.Module):
+    def __init__(self):
+        super(DeepSleepNetBranch, self).__init__()
+        self.conv1 = nn.Sequential(
+            nn.Conv1d(1, 64, kernel_size=50, stride=6, padding=22),
+            nn.BatchNorm1d(64), nn.ReLU(),
+            nn.MaxPool1d(kernel_size=4, stride=4), nn.Dropout(0.5),
+            nn.Conv1d(64, 128, kernel_size=8, padding=4),
+            nn.BatchNorm1d(128), nn.ReLU(),
+            nn.Conv1d(128, 128, kernel_size=8, padding=4),
+            nn.BatchNorm1d(128), nn.ReLU(),
+            nn.Conv1d(128, 128, kernel_size=8, padding=4),
+            nn.BatchNorm1d(128), nn.ReLU(),
+            nn.MaxPool1d(kernel_size=4, stride=4), nn.Dropout(0.5)
+        )
+        self.conv2 = nn.Sequential(
+            nn.Conv1d(1, 64, kernel_size=400, stride=50, padding=200),
+            nn.BatchNorm1d(64), nn.ReLU(),
+            nn.MaxPool1d(kernel_size=4, stride=4), nn.Dropout(0.5),
+            nn.Conv1d(64, 128, kernel_size=6, padding=3),
+            nn.BatchNorm1d(128), nn.ReLU(),
+            nn.Conv1d(128, 128, kernel_size=6, padding=3),
+            nn.BatchNorm1d(128), nn.ReLU(),
+            nn.Conv1d(128, 128, kernel_size=6, padding=3),
+            nn.BatchNorm1d(128), nn.ReLU(),
+            nn.MaxPool1d(kernel_size=2, stride=2), nn.Dropout(0.5)
+        )
+        self.lstm = nn.LSTM(input_size=128, hidden_size=512, num_layers=2, batch_first=True, bidirectional=True)
+
+    def forward(self, x):
+        x1 = self.conv1(x)
+        x2 = self.conv2(x)
+        min_len = min(x1.shape[2], x2.shape[2])
+        x1 = x1[:, :, :min_len]
+        x2 = x2[:, :, :min_len]
+        x = x1 + x2
+        x = x.permute(0, 2, 1)
+        lstm_out, _ = self.lstm(x)
+        embedding = lstm_out[:, -1, :]
+        return embedding
+
+class MultiChannelDeepSleepNet(nn.Module):
+    def __init__(self, num_classes=5):
+        super(MultiChannelDeepSleepNet, self).__init__()
+        self.eeg_branch = DeepSleepNetBranch()
+        self.eog_branch = DeepSleepNetBranch()
+        self.emg_branch = DeepSleepNetBranch()
+        self.fusion_dim = 1024 * 3
+        self.classifier = nn.Sequential(
+            nn.Linear(self.fusion_dim, 512), nn.ReLU(), nn.Dropout(0.5),
+            nn.Linear(512, num_classes)
+        )
+
+    def forward(self, x):
+        eeg_embedding = self.eeg_branch(x[:, 0:1, :])
+        eog_embedding = self.eog_branch(x[:, 1:2, :])
+        emg_embedding = self.emg_branch(x[:, 2:3, :])
+        fused_embedding = torch.cat([eeg_embedding, eog_embedding, emg_embedding], dim=1)
+        output = self.classifier(fused_embedding)
+        return output
+
+===== ./app.py =====
+# ./app.py
+
+import os
+import json
+from collections import OrderedDict
+import numpy as np
+import torch
+from flask import Flask, render_template, request, jsonify
+import mne
+
+# Import class model đã được cập nhật cho 3 kênh
+from model import MultiChannelSleepTransformer, MultiChannelDeepSleepNet
+
+# --- KHỞI TẠO ỨNG DỤNG FLASK ---
+app = Flask(__name__)
+
+# --- CẤU HÌNH ---
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+DATASET_DIR = "datasets" 
+
+# Cập nhật CHANNEL_MAPPING để chỉ chứa 3 kênh, khớp với lúc training
+CHANNEL_MAPPING = {
+    'eeg': 'EEG Fpz-Cz',
+    'eog': 'EOG horizontal',
+    'emg': 'EMG submental'
+}
+
+print(f"Sử dụng thiết bị: {device}")
+
+# Các tham số của Transformer cần khớp với lúc train
+TRANSFORMER_PARAMS = {"input_size": 3000, "patch_size": 30, "d_model": 128, "num_heads": 8, "num_layers": 6, "num_classes": 5}
+# Đảm bảo tên file trọng số khớp với file bạn đã tải về
+TRANSFORMER_PATH = "model_weights/MultiChannelSleepTransformer_best.pt" 
+model_transformer = MultiChannelSleepTransformer(**TRANSFORMER_PARAMS)
+
+# Logic tải model giờ đây không cần re-map nữa vì model đã được lưu đúng cấu trúc
+try:
+    print(f"Đang tải trọng số từ {TRANSFORMER_PATH}...")
+    model_transformer.load_state_dict(torch.load(TRANSFORMER_PATH, map_location=device))
+    print("Đã tải thành công trọng số cho Model Transformer.")
+except Exception as e:
+    print(f"[LỖI] Không thể tải model Transformer. Lỗi: {e}. Model sẽ sử dụng trọng số ngẫu nhiên.")
+model_transformer.to(device).eval()
+
+# Đảm bảo tên file trọng số khớp với file bạn đã tải về
+DEEPSLEEPNET_PATH = "model_weights/MultiChannelDeepSleepNet_best.pt" 
+deepsleepnet_available = False
+model_deepsleepnet = None
+try:
+    print(f"Đang tải trọng số từ {DEEPSLEEPNET_PATH}...")
+    model_deepsleepnet = MultiChannelDeepSleepNet(num_classes=5)
+    model_deepsleepnet.load_state_dict(torch.load(DEEPSLEEPNET_PATH, map_location=device))
+    model_deepsleepnet.to(device).eval()
+    print("Đã tải thành công trọng số cho Model DeepSleepNet.")
+    deepsleepnet_available = True
+except Exception as e:
+    print(f"[CẢNH BÁO] Lỗi khi tải DeepSleepNet: {e}. Chức năng này sẽ bị vô hiệu hóa.")
+
+MODEL_DISPLAY_NAMES = {"transformer": "Sleep Transformer", "deepsleepnet": "DeepSleepNet"}
+labels = {"W": "Wake", "N1": "N1", "N2": "N2", "N3": "N3", "REM": "REM"}
+label_keys = ["W", "N1", "N2", "N3", "REM"]
+full_labels = {"W": "Wake (Thức)", "N1": "N1 (Ngủ nông)", "N2": "N2 (Ngủ nông)", "N3": "N3 (Ngủ sâu)", "REM": "REM (Ngủ mơ)"}
+
+
+def find_dataset_files():
+    """Quét thư mục DATASET_DIR và trả về danh sách các file .edf đã được sắp xếp."""
+    if not os.path.exists(DATASET_DIR):
+        return []
+    return sorted([f for f in os.listdir(DATASET_DIR) if f.endswith('.edf')])
+
+# ==============================================================================
+# ROUTE CHÍNH: HIỂN THỊ GIAO DIỆN
+# ==============================================================================
+@app.route("/", methods=['GET'])
+def index():
+    """Hiển thị trang chính với danh sách các file epoch có sẵn."""
+    available_files = find_dataset_files()
+    return render_template("index.html", available_files=available_files)
+
+# ==============================================================================
+# API ROUTE: LẤY DỮ LIỆU TỪ MỘT FILE EPOCH (LOGIC ĐÃ ĐƯỢC VIẾT LẠI)
+# ==============================================================================
+@app.route("/get-epoch-data", methods=["POST"])
+def get_epoch_data():
+    """Trích xuất dữ liệu tín hiệu từ một file .edf (vốn là một epoch)."""
+    try:
+        data = request.get_json()
+        filename = data.get("filename")
+
+        if not filename:
+            return jsonify({"error": "Tên file không được cung cấp."}), 400
+
+        filepath = os.path.join(DATASET_DIR, filename)
+        if not os.path.exists(filepath):
+            return jsonify({"error": f"Không tìm thấy file: {filename}"}), 404
+
+        # Đọc file EDF (file này chính là một epoch)
+        raw = mne.io.read_raw_edf(filepath, preload=True, verbose=False)
+        
+        # Kiểm tra các kênh yêu cầu có tồn tại trong file không
+        for ch_name in CHANNEL_MAPPING.values():
+            if ch_name not in raw.ch_names:
+                return jsonify({"error": f"Không tìm thấy kênh '{ch_name}' trong file này. Vui lòng kiểm tra file EDF và biến CHANNEL_MAPPING."}), 400
+        
+        # Lấy dữ liệu từ các kênh đã định nghĩa
+        signals = {}
+        for signal_type, channel_name in CHANNEL_MAPPING.items():
+            signal_data = raw.get_data(picks=[channel_name])[0][:3000].tolist()
+            signals[signal_type] = signal_data
+        
+        return jsonify({
+            "success": True, 
+            "signals": signals
+        })
+
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+# ==============================================================================
+# API ROUTE: THỰC HIỆN DỰ ĐOÁN VÀ SO SÁNH VỚI LABEL GỐC
+# ==============================================================================
+@app.route("/predict", methods=["POST"])
+def predict():
+    """Nhận dữ liệu, dự đoán, và trả về kết quả cùng với label gốc được trích xuất từ tên file."""
+    try:
+        data = request.get_json()
+        filename = data['filename']
+        eeg = data['eeg']
+        eog = data['eog']
+        emg = data['emg']
+
+        if any(len(sig) != 3000 for sig in [eeg, eog, emg]):
+            return jsonify({"error": "Dữ liệu đầu vào không hợp lệ. Mỗi kênh phải có 3000 điểm dữ liệu."}), 400
+
+        # Chuẩn bị tensor đầu vào, chuẩn hóa Z-score giống hệt lúc training
+        x = np.stack([eeg, eog, emg])
+        x = (x - x.mean(axis=1, keepdims=True)) / (x.std(axis=1, keepdims=True) + 1e-8)
+        x_tensor = torch.from_numpy(x).unsqueeze(0).float().to(device)
+        
+        prediction_results = OrderedDict()
+        models_to_run = {"transformer": model_transformer}
+        if deepsleepnet_available:
+            models_to_run["deepsleepnet"] = model_deepsleepnet
+
+        for name, model in models_to_run.items():
+            with torch.no_grad():
+                output = model(x_tensor)
+                probabilities = torch.softmax(output, dim=1)[0]
+                pred_index = probabilities.argmax().item()
+                pred_key = label_keys[pred_index]
+                probs_percent = (probabilities * 100).tolist()
+                
+                prediction_results[name] = {
+                    "name": MODEL_DISPLAY_NAMES[name],
+                    "prediction": full_labels[pred_key],
+                    "prediction_key": pred_key, # Gửi key ('W', 'N1',..) để JS so sánh
+                    "probabilities": {label_keys[i]: f"{probs_percent[i]:.2f}%" for i in range(len(label_keys))}
+                }
+        
+        # Trích xuất label thật từ tên file
+        ground_truth_key = "UNKNOWN"
+        try:
+            # Tách chuỗi dựa trên '_label_' và lấy phần sau nó, sau đó bỏ phần đuôi '.edf'
+            # Ví dụ: '..._label_W.edf' -> 'W'
+            ground_truth_key = filename.split('_label_')[-1].split('.')[0]
+        except Exception:
+            # Bỏ qua nếu tên file không có định dạng đúng, ground_truth_key sẽ là "UNKNOWN"
+            pass
+            
+        ground_truth_full = full_labels.get(ground_truth_key, "Không rõ")
+        
+        return jsonify({
+            "success": True,
+            "prediction_results": prediction_results,
+            "ground_truth_key": ground_truth_key,
+            "ground_truth_full": ground_truth_full
+        })
+        
+    except Exception as e:
+        # Ghi lại lỗi ra console của server để debug
+        print(f"Lỗi trong hàm predict: {e}")
+        return jsonify({"error": str(e)}), 500
+
+# --- KHỐI CHẠY CHÍNH ---
+if __name__ == "__main__":
+    app.run(host='0.0.0.0', port=5000, debug=True)
+
+===== ./static/css/style.css =====
+/* ./static/css/style.css */
+
+body {
+    font-family: 'Roboto', sans-serif;
+}
+
+.card {
+    border: none;
+    transition: transform 0.2s ease-in-out, box-shadow 0.2s ease-in-out;
+}
+
+.card:hover {
+    transform: translateY(-5px);
+    box-shadow: 0 0.5rem 1rem rgba(0, 0, 0, 0.15) !important;
+}
+
+#predict-btn .spinner-border {
+    margin-right: 5px;
+}
+
+===== ./templates/index.html =====
+<!-- ./templates/index.html -->
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Phân loại & Trực quan hóa Giấc ngủ</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Roboto:wght@300;400;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+    <style>
+        .chart-container { position: relative; height: 400px; width: 100%; }
+        .spinner-border { vertical-align: -0.125em; }
+        .hidden { display: none !important; }
+    </style>
+</head>
+<body class="bg-light">
+    <div class="container mt-5 mb-5">
+        <div class="text-center mb-5">
+            <h1 class="display-5 fw-bold">Hệ thống Phân loại Giấc ngủ Tích hợp</h1>
+            <p class="lead text-muted">Chọn một epoch dữ liệu, xem trực quan và nhận kết quả dự đoán từ AI so với label gốc.</p>
+        </div>
+
+        <div class="row g-5">
+            <!-- Cột điều khiển -->
+            <div class="col-lg-5">
+                <div class="card shadow-sm">
+                    <div class="card-body p-4">
+                        <h4 class="card-title mb-3">Bảng điều khiển</h4>
+                        <div class="mb-3">
+                            <label for="file-selector" class="form-label">1. Chọn File Epoch (.edf)</label>
+                            <select class="form-select" id="file-selector">
+                                <option selected disabled>-- Vui lòng chọn một file --</option>
+                                {% if available_files %}
+                                    {% for file in available_files %}
+                                        <option value="{{ file }}">{{ file }}</option>
+                                    {% endfor %}
+                                {% else %}
+                                    <option disabled>Không tìm thấy file nào trong thư mục 'datasets'</option>
+                                {% endif %}
+                            </select>
+                        </div>
+                        
+                        <div class="d-grid gap-2">
+                            <button type="button" id="process-btn" class="btn btn-primary" disabled>
+                                <span id="btn-spinner" class="spinner-border spinner-border-sm hidden" role="status" aria-hidden="true"></span>
+                                <span id="btn-text">Tải Dữ liệu & Dự đoán</span>
+                            </button>
+                        </div>
+                         <div id="global-error" class="alert alert-danger mt-3 hidden"></div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Cột kết quả -->
+            <div class="col-lg-7">
+                <div class="card shadow-sm">
+                    <div class="card-body p-4">
+                        <h4 class="card-title mb-3">Kết quả Phân tích</h4>
+                        <div id="results-placeholder" class="alert alert-info text-center">
+                            Chọn file, sau đó nhấn nút để xem kết quả.
+                        </div>
+                        <div id="results-container" class="hidden"></div>
+                    </div>
+                </div>
+                
+                <!-- Cột Trực quan hóa -->
+                <div id="visualization-section" class="card shadow-sm mt-4 hidden">
+                    <div class="card-body p-4">
+                        <h4 class="card-title mb-3">Trực quan hóa Tín hiệu</h4>
+                        <h5 class="text-center text-muted mb-2">Biểu đồ tổng quan 3 kênh</h5>
+                        <div class="chart-container mb-4"><canvas id="signalChart"></canvas></div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/hammerjs@2.0.8"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-zoom@2.0.1/dist/chartjs-plugin-zoom.min.js"></script>
+
+    <script>
+        // --- DOM Elements ---
+        const fileSelector = document.getElementById('file-selector');
+        const processBtn = document.getElementById('process-btn');
+        const btnSpinner = document.getElementById('btn-spinner');
+        const btnText = document.getElementById('btn-text');
+        const resultsPlaceholder = document.getElementById('results-placeholder');
+        const resultsContainer = document.getElementById('results-container');
+        const vizSection = document.getElementById('visualization-section');
+        const globalError = document.getElementById('global-error');
+
+        let signalChart;
+        let currentSignalData = null;
+        
+        // --- Event Listeners ---
+        fileSelector.addEventListener('change', () => {
+            processBtn.disabled = false;
+        });
+
+        processBtn.addEventListener('click', handleProcessRequest);
+
+        // --- Functions ---
+        function setLoadingState(isLoading) {
+            if (isLoading) {
+                processBtn.disabled = true;
+                btnSpinner.classList.remove('hidden');
+                btnText.textContent = 'Đang xử lý...';
+                globalError.classList.add('hidden');
+            } else {
+                processBtn.disabled = false;
+                btnSpinner.classList.add('hidden');
+                btnText.textContent = 'Tải Dữ liệu & Dự đoán';
+            }
+        }
+
+        function showError(message) {
+            globalError.textContent = `Lỗi: ${message}`;
+            globalError.classList.remove('hidden');
+        }
+
+        async function handleProcessRequest() {
+            setLoadingState(true);
+            const filename = fileSelector.value;
+
+            // Step 1: Fetch epoch data from the backend
+            try {
+                const response = await fetch('/get-epoch-data', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ filename }),
+                });
+                const data = await response.json();
+
+                if (!response.ok || !data.success) {
+                    throw new Error(data.error || 'Không thể tải dữ liệu epoch.');
+                }
+                
+                currentSignalData = data.signals;
+                
+                // Step 2: If data is fetched, send it (and the filename) for prediction
+                await handlePrediction(currentSignalData, filename);
+
+            } catch (error) {
+                showError(error.message);
+                setLoadingState(false);
+            }
+        }
+        
+        async function handlePrediction(signals, filename) {
+             try {
+                const response = await fetch('/predict', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ ...signals, filename }),
+                });
+                const data = await response.json();
+
+                if (!response.ok || !data.success) {
+                    throw new Error(data.error || 'Lỗi khi thực hiện dự đoán.');
+                }
+                
+                // Update UI with results
+                displayPredictionResults(data.prediction_results, data.ground_truth_key, data.ground_truth_full);
+                drawSignalChart(signals);
+                
+                resultsPlaceholder.classList.add('hidden');
+                resultsContainer.classList.remove('hidden');
+                vizSection.classList.remove('hidden');
+                
+             } catch(error) {
+                showError(error.message);
+             } finally {
+                setLoadingState(false);
+             }
+        }
+
+        function displayPredictionResults(results, ground_truth_key, ground_truth_full) {
+            resultsContainer.innerHTML = ''; // Clear previous results
+            for (const modelKey in results) {
+                const result = results[modelKey];
+
+                // Compare prediction with ground truth to determine style and icon
+                const is_correct = result.prediction_key === ground_truth_key;
+                const result_color_class = is_correct ? 'text-success' : 'text-danger';
+                const icon = is_correct 
+                    ? `<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" fill="currentColor" class="bi bi-check-circle-fill" viewBox="0 0 16 16"><path d="M16 8A8 8 0 1 1 0 8a8 8 0 0 1 16 0zm-3.97-3.03a.75.75 0 0 0-1.08.022L7.477 9.417 5.384 7.323a.75.75 0 0 0-1.06 1.06L6.97 11.03a.75.75 0 0 0 1.079-.02l3.992-4.99a.75.75 0 0 0-.01-1.05z"/></svg>`
+                    : `<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" fill="currentColor" class="bi bi-x-circle-fill" viewBox="0 0 16 16"><path d="M16 8A8 8 0 1 1 0 8a8 8 0 0 1 16 0zM5.354 4.646a.5.5 0 1 0-.708.708L7.293 8l-2.647 2.646a.5.5 0 0 0 .708.708L8 8.707l2.646 2.647a.5.5 0 0 0 .708-.708L8.707 8l2.647-2.646a.5.5 0 0 0-.708-.708L8 7.293 5.354 4.646z"/></svg>`;
+
+                let probabilitiesHtml = '';
+                for(const stage in result.probabilities) {
+                    probabilitiesHtml += `
+                        <li class="list-group-item d-flex justify-content-between align-items-center">
+                            ${stage}
+                            <span class="badge bg-primary rounded-pill">${result.probabilities[stage]}</span>
+                        </li>`;
+                }
+
+                const resultCardHtml = `
+                    <div class="card mb-3">
+                        <div class="card-header fw-bold">${result.name}</div>
+                        <div class="card-body">
+                            <div class="row align-items-center text-center">
+                                <div class="col">
+                                    <h6 class="text-muted">DỰ ĐOÁN CỦA AI</h6>
+                                    <h5 class="display-6 ${result_color_class}">${result.prediction}</h5>
+                                </div>
+                                <div class="col-2 ${result_color_class}">
+                                    ${icon}
+                                </div>
+                                <div class="col">
+                                    <h6 class="text-muted">LABEL GỐC</h6>
+                                    <h5 class="display-6">${ground_truth_full}</h5>
+                                </div>
+                            </div>
+                            <hr>
+                            <p class="card-text text-muted">Phân phối xác suất:</p>
+                            <ul class="list-group list-group-flush">${probabilitiesHtml}</ul>
+                        </div>
+                    </div>`;
+                resultsContainer.innerHTML += resultCardHtml.trim();
+            }
+        }
+
+        function drawSignalChart(signals) {
+            if (signalChart) signalChart.destroy();
+            const ctx = document.getElementById('signalChart').getContext('2d');
+            const labels = Array.from({ length: 3000 }, (_, i) => i + 1); 
+            signalChart = new Chart(ctx, {
+                type: 'line', 
+                data: { labels, datasets: [ 
+                        { label: 'EEG', data: signals.eeg, borderColor: 'rgba(54, 162, 235, 1)', borderWidth: 1, pointRadius: 0 }, 
+                        { label: 'EOG', data: signals.eog, borderColor: 'rgba(255, 99, 132, 1)', borderWidth: 1, pointRadius: 0 }, 
+                        { label: 'EMG', data: signals.emg, borderColor: 'rgba(75, 192, 192, 1)', borderWidth: 1, pointRadius: 0 }
+                    ] }, 
+                options: { 
+                    responsive: true, 
+                    maintainAspectRatio: false, 
+                    animation: false, 
+                    scales: { 
+                        x: { title: { display: true, text: 'Điểm dữ liệu' } }, 
+                        y: { title: { display: true, text: 'Amplitude' } } 
+                    },
+                    plugins: { 
+                        legend: { position: 'top' },
+                        zoom: { 
+                            pan: { enabled: true, mode: 'x' }, 
+                            zoom: { wheel: { enabled: true }, pinch: { enabled: true }, mode: 'x' } 
+                        } 
+                    }
+                }
+            });
+        }
+    </script>
+</body>
+</html>
+
+===== ./templates/ecg.html =====
+<!-- ./templates/ecg.html -->
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Trực quan hóa ECG</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Roboto:wght@300;400;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+    <style>
+        .chart-container {
+            position: relative;
+            height: 400px; /* Chiều cao cố định cho biểu đồ */
+            width: 100%;
+        }
+        #ecgChart {
+            background-color: #f8f9fa;
+            border-radius: 5px;
+            border: 1px solid #dee2e6;
+        }
+    </style>
+</head>
+<body class="bg-light">
+
+    <div class="container mt-5 mb-5">
+        <div class="text-center mb-5">
+            <h1 class="display-5 fw-bold">Trình trực quan hóa tín hiệu ECG</h1>
+            <p class="lead text-muted">Tải lên file ECG từ bộ dữ liệu PhysioNet (.dat & .hea) để xem biểu đồ và các đỉnh R-peak.</p>
+            <a href="/" class="btn btn-outline-primary mt-2">Quay lại trang phân loại giấc ngủ</a>
+        </div>
+
+        <div class="row">
+            <div class="col-md-8 mx-auto">
+                <div class="card shadow-sm">
+                    <div class="card-body p-4">
+                        <h4 class="card-title mb-4">Tải lên File ECG</h4>
+                        <form method="POST" enctype="multipart/form-data">
+                            <div class="row g-3 align-items-center">
+                                <div class="col">
+                                    <label for="dat_file" class="form-label">File Tín hiệu (.dat)</label>
+                                    <input class="form-control" type="file" id="dat_file" name="dat_file" required>
+                                </div>
+                                <div class="col">
+                                    <label for="hea_file" class="form-label">File Header (.hea)</label>
+                                    <input class="form-control" type="file" id="hea_file" name="hea_file" required>
+                                </div>
+                                <div class="col-auto align-self-end">
+                                    <button type="submit" class="btn btn-success">Trực quan hóa</button>
+                                </div>
+                            </div>
+                        </form>
+                    </div>
+                </div>
+
+                <!-- Vùng hiển thị lỗi và biểu đồ -->
+                <div class="card shadow-sm mt-4">
+                    <div class="card-body p-4">
+                        <h4 class="card-title mb-3">Biểu đồ Tín hiệu</h4>
+                        {% if error %}
+                        <div class="alert alert-danger">{{ error }}</div>
+                        {% endif %}
+                        
+                        <div class="chart-container">
+                            <canvas id="ecgChart"></canvas>
+                        </div>
+                        
+                        {% if not chart_data %}
+                        <div class="alert alert-info mt-3 text-center">
+                            Biểu đồ sẽ được hiển thị ở đây sau khi bạn tải file lên.
+                        </div>
+                        {% else %}
+                        <div class="alert alert-secondary mt-3 text-center">
+                            <strong>Mẹo:</strong> Dùng con lăn chuột để <strong>phóng to/thu nhỏ</strong>. Giữ chuột trái và kéo để <strong>di chuyển</strong> biểu đồ.
+                        </div>
+                        {% endif %}
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Chart.js và plugin zoom -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/hammerjs@2.0.8"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-zoom@2.0.1/dist/chartjs-plugin-zoom.min.js"></script>
+
+    <script>
+        const chartDataJSON = '{{ chart_data | safe }}';
+        if (chartDataJSON && chartDataJSON !== 'null') {
+            const data = JSON.parse(chartDataJSON);
+            const ctx = document.getElementById('ecgChart').getContext('2d');
+
+            new Chart(ctx, {
+                type: 'line',
+                data: {
+                    labels: data.time,
+                    datasets: [
+                        {
+                            label: `${data.signal_name} (${data.unit})`,
+                            data: data.signal,
+                            borderColor: 'rgba(54, 162, 235, 1)',
+                            borderWidth: 1.5,
+                            pointRadius: 0, // Không hiển thị điểm trên đường line
+                            tension: 0.1
+                        },
+                        {
+                            label: 'R-Peaks',
+                            data: data.r_peaks_time.map((t, i) => ({ x: t, y: data.r_peaks_value[i] })),
+                            pointBackgroundColor: 'rgba(255, 99, 132, 1)',
+                            pointRadius: 5,
+                            pointHoverRadius: 7,
+                            type: 'scatter', // Loại biểu đồ là scatter cho các điểm R-peak
+                        }
+                    ]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    scales: {
+                        x: {
+                            title: {
+                                display: true,
+                                text: 'Thời gian (giây)'
+                            },
+                            grid: {
+                                color: 'rgba(0, 0, 0, 0.05)'
+                            }
+                        },
+                        y: {
+                            title: {
+                                display: true,
+                                text: `Amplitude (${data.unit})`
+                            },
+                             grid: {
+                                color: 'rgba(0, 0, 0, 0.05)'
+                            }
+                        }
+                    },
+                    plugins: {
+                        legend: {
+                            position: 'top',
+                        },
+                        title: {
+                            display: true,
+                            text: `Tín hiệu ECG - ${data.signal_name}`,
+                            font: {
+                                size: 16
+                            }
+                        },
+                        // Cấu hình plugin zoom
+                        zoom: {
+                            pan: {
+                                enabled: true,
+                                mode: 'x', // Chỉ pan theo trục x
+                            },
+                            zoom: {
+                                wheel: {
+                                    enabled: true, // Cho phép zoom bằng con lăn chuột
+                                },
+                                pinch: {
+                                    enabled: true // Cho phép zoom trên màn hình cảm ứng
+                                },
+                                mode: 'x', // Chỉ zoom theo trục x
+                            }
+                        }
+                    }
+                }
+            });
+        }
+    </script>
+</body>
+</html>
+
+===== DIRECTORY TREE =====
+./
+    requirements.txt
+    check_channel.py
+    model.py
+    app.py
+    _utils/
+    static/
+        css/
+            style.css
+    templates/
+        index.html
+        ecg.html
+    datasets/
+        SC4381F_epoch_025_label_W.edf
+        SC4381F_epoch_057_label_W.edf
+        SC4381F_epoch_029_label_W.edf
+        SC4381F_epoch_060_label_W.edf
+        SC4381F_epoch_075_label_W.edf
+        SC4381F_epoch_054_label_W.edf
+        SC4381F_epoch_070_label_W.edf
+        SC4381F_epoch_013_label_W.edf
+        SC4381F_epoch_061_label_W.edf
+        SC4381F_epoch_052_label_W.edf
+        SC4381F_epoch_067_label_W.edf
+        SC4381F_epoch_099_label_W.edf
+        SC4381F_epoch_090_label_W.edf
+        SC4381F_epoch_063_label_W.edf
+        SC4381F_epoch_072_label_W.edf
+        SC4381F_epoch_028_label_W.edf
+        SC4381F_epoch_074_label_W.edf
+        SC4381F_epoch_026_label_W.edf
+        SC4381F_epoch_039_label_W.edf
+        SC4381F_epoch_003_label_W.edf
+        SC4381F_epoch_088_label_W.edf
+        SC4381F_epoch_022_label_W.edf
+        SC4381F_epoch_041_label_W.edf
+        SC4381F_epoch_094_label_W.edf
+        SC4381F_epoch_032_label_W.edf
+        SC4381F_epoch_081_label_W.edf
+        SC4381F_epoch_010_label_W.edf
+        SC4381F_epoch_055_label_W.edf
+        SC4381F_epoch_083_label_W.edf
+        SC4381F_epoch_056_label_W.edf
+        SC4381F_epoch_044_label_W.edf
+        SC4381F_epoch_045_label_W.edf
+        SC4381F_epoch_097_label_W.edf
+        SC4381F_epoch_016_label_W.edf
+        SC4381F_epoch_002_label_W.edf
+        SC4381F_epoch_012_label_W.edf
+        SC4381F_epoch_001_label_W.edf
+        SC4381F_epoch_079_label_W.edf
+        SC4381F_epoch_005_label_W.edf
+        SC4381F_epoch_098_label_W.edf
+        SC4381F_epoch_018_label_W.edf
+        SC4381F_epoch_011_label_W.edf
+        SC4381F_epoch_015_label_W.edf
+        SC4381F_epoch_080_label_W.edf
+        SC4381F_epoch_062_label_W.edf
+        SC4381F_epoch_037_label_W.edf
+        SC4381F_epoch_096_label_W.edf
+        SC4381F_epoch_017_label_W.edf
+        SC4381F_epoch_019_label_W.edf
+        SC4381F_epoch_091_label_W.edf
+        SC4381F_epoch_046_label_W.edf
+        SC4381F_epoch_033_label_W.edf
+        SC4381F_epoch_066_label_W.edf
+        SC4381F_epoch_024_label_W.edf
+        SC4381F_epoch_007_label_W.edf
+        SC4381F_epoch_087_label_W.edf
+        SC4381F_epoch_008_label_W.edf
+        SC4381F_epoch_009_label_W.edf
+        SC4381F_epoch_027_label_W.edf
+        SC4381F_epoch_085_label_W.edf
+        SC4381F_epoch_064_label_W.edf
+        SC4381F_epoch_082_label_W.edf
+        SC4381F_epoch_043_label_W.edf
+        SC4381F_epoch_084_label_W.edf
+        SC4381F_epoch_031_label_W.edf
+        SC4381F_epoch_035_label_W.edf
+        SC4381F_epoch_071_label_W.edf
+        SC4381F_epoch_042_label_W.edf
+        SC4381F_epoch_030_label_W.edf
+        SC4381F_epoch_077_label_W.edf
+        SC4381F_epoch_004_label_W.edf
+        SC4381F_epoch_038_label_W.edf
+        SC4381F_epoch_059_label_W.edf
+        SC4381F_epoch_092_label_W.edf
+        SC4381F_epoch_086_label_W.edf
+        SC4381F_epoch_073_label_W.edf
+        SC4381F_epoch_014_label_W.edf
+        SC4381F_epoch_034_label_W.edf
+        SC4381F_epoch_048_label_W.edf
+        SC4381F_epoch_047_label_W.edf
+        SC4381F_epoch_058_label_W.edf
+        SC4381F_epoch_050_label_W.edf
+        SC4381F_epoch_021_label_W.edf
+        SC4381F_epoch_036_label_W.edf
+        SC4381F_epoch_000_label_W.edf
+        SC4381F_epoch_023_label_W.edf
+        SC4381F_epoch_020_label_W.edf
+        SC4381F_epoch_076_label_W.edf
+        SC4381F_epoch_040_label_W.edf
+        SC4381F_epoch_006_label_W.edf
+        SC4381F_epoch_065_label_W.edf
+        SC4381F_epoch_089_label_W.edf
+        SC4381F_epoch_053_label_W.edf
+        SC4381F_epoch_078_label_W.edf
+        SC4381F_epoch_051_label_W.edf
+        SC4381F_epoch_093_label_W.edf
+        SC4381F_epoch_068_label_W.edf
+        SC4381F_epoch_069_label_W.edf
+        SC4381F_epoch_049_label_W.edf
+        SC4381F_epoch_095_label_W.edf
+    model_weights/
+        MultiChannelDeepSleepNet_best.pt
+        MultiChannelSleepTransformer_best.pt
+    uploads/

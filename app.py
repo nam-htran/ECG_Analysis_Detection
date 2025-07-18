@@ -7,6 +7,9 @@ import numpy as np
 import torch
 from flask import Flask, render_template, request, jsonify
 import mne
+import io  # Đặt ở đầu file nếu chưa có
+import tempfile
+
 
 # Import class model đã được cập nhật cho 3 kênh
 from model import MultiChannelSleepTransformer, MultiChannelDeepSleepNet
@@ -17,6 +20,11 @@ app = Flask(__name__)
 # --- CẤU HÌNH ---
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 DATASET_DIR = "datasets" 
+ALLOWED_EXTENSIONS = {'.edf'}
+
+def allowed_file(filename):
+    """Kiểm tra xem file có phần mở rộng hợp lệ không (.edf)"""
+    return os.path.splitext(filename)[1].lower() in ALLOWED_EXTENSIONS
 
 # Cập nhật CHANNEL_MAPPING để chỉ chứa 3 kênh, khớp với lúc training
 CHANNEL_MAPPING = {
@@ -176,7 +184,99 @@ def predict():
     except Exception as e:
         print(f"Lỗi trong hàm predict: {e}")
         return jsonify({"error": str(e)}), 500
+    
+@app.route("/upload-and-predict", methods=["POST"])
+def upload_and_predict():
+    """Nhận file EDF tải lên, trích xuất dữ liệu và trả về kết quả dự đoán."""
+    if "file" not in request.files:
+        return jsonify({"error": "Không có file EDF nào được gửi lên."}), 400
 
+    file = request.files["file"]
+    if file.filename == "":
+        return jsonify({"error": "Tên file trống."}), 400
+
+    if not allowed_file(file.filename):
+        return jsonify({"error": "File không hợp lệ. Chỉ chấp nhận .edf"}), 400
+
+    temp_file_path = ""
+    try:
+        # Sử dụng tempfile để tạo file tạm an toàn
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".edf") as temp_f:
+            file.save(temp_f.name)
+            temp_file_path = temp_f.name
+
+        raw = mne.io.read_raw_edf(temp_file_path, preload=True, verbose=False)
+
+        for ch_name in CHANNEL_MAPPING.values():
+            if ch_name not in raw.ch_names:
+                return jsonify({"error": f"Thiếu kênh '{ch_name}' trong file EDF."}), 400
+
+        signals = {}
+        for signal_type, channel_name in CHANNEL_MAPPING.items():
+            signal_data = raw.get_data(picks=[channel_name])[0][:3000].tolist()
+            signals[signal_type] = signal_data
+
+        x = np.stack([signals['eeg'], signals['eog'], signals['emg']])
+        x = (x - x.mean(axis=1, keepdims=True)) / (x.std(axis=1, keepdims=True) + 1e-8)
+        x_tensor = torch.from_numpy(x).unsqueeze(0).float().to(device)
+
+        prediction_results = OrderedDict()
+        models_to_run = {"transformer": model_transformer}
+        if deepsleepnet_available:
+            models_to_run["deepsleepnet"] = model_deepsleepnet
+
+        for name, model in models_to_run.items():
+            with torch.no_grad():
+                output = model(x_tensor)
+                probabilities = torch.softmax(output, dim=1)[0]
+                pred_index = probabilities.argmax().item()
+                pred_key = label_keys[pred_index]
+                probs_percent = (probabilities * 100).tolist()
+
+                prediction_results[name] = {
+                    "name": MODEL_DISPLAY_NAMES[name],
+                    "prediction": full_labels[pred_key],
+                    "prediction_key": pred_key,
+                    "probabilities": {label_keys[i]: f"{probs_percent[i]:.2f}%" for i in range(len(label_keys))}
+                }
+        
+        # ======================================================================
+        # === BẮT ĐẦU THAY ĐỔI: TRÍCH XUẤT LABEL TỪ TÊN FILE TẢI LÊN ===
+        # ======================================================================
+        ground_truth_key = "UNKNOWN"
+        ground_truth_full = "Không rõ (file tải lên)"
+        try:
+            # Lấy tên file gốc từ đối tượng 'file' mà người dùng tải lên
+            original_filename = file.filename 
+            # Tách chuỗi dựa trên '_label_' và lấy phần sau nó, sau đó bỏ phần đuôi '.edf'
+            key_from_filename = original_filename.split('_label_')[-1].split('.')[0]
+            
+            # Chỉ cập nhật nếu key tìm thấy nằm trong danh sách label hợp lệ
+            if key_from_filename in full_labels:
+                ground_truth_key = key_from_filename
+                ground_truth_full = full_labels[ground_truth_key]
+
+        except Exception:
+            # Nếu tên file không có định dạng đúng hoặc có lỗi, giữ nguyên giá trị mặc định
+            pass
+        # ======================================================================
+        # === KẾT THÚC THAY ĐỔI ===
+        # ======================================================================
+
+        return jsonify({
+            "success": True,
+            "prediction_results": prediction_results,
+            "signals": signals,
+            "ground_truth_key": ground_truth_key,      # Sử dụng key đã trích xuất
+            "ground_truth_full": ground_truth_full    # Sử dụng label đầy đủ đã tìm thấy
+        })
+
+    except Exception as e:
+        return jsonify({"error": f"Lỗi xử lý EDF: {str(e)}"}), 500
+    
+    finally:
+        if temp_file_path and os.path.exists(temp_file_path):
+            os.remove(temp_file_path)
 # --- KHỐI CHẠY CHÍNH ---
 if __name__ == "__main__":
     app.run(host='0.0.0.0', port=5000, debug=True)

@@ -27,6 +27,16 @@
                 <div class="card shadow-sm">
                     <div class="card-body p-4">
                         <h4 class="card-title mb-3">Bảng điều khiển</h4>
+                            <div class="mb-3">
+                                <label for="upload-test-edf" class="form-label">Hoặc: Tải lên file EDF để phân tích ngay</label>
+                                <form id="upload-predict-form" enctype="multipart/form-data">
+                                    <div class="input-group">
+                                        <input type="file" class="form-control" id="upload-test-edf" name="file" accept=".edf" required>
+                                        <button class="btn btn-outline-success" type="submit">Phân tích</button>
+                                    </div>
+                                </form>
+                                <div id="upload-predict-status" class="form-text mt-2 text-muted"></div>
+                            </div>
                         <div class="mb-3">
                             <label for="file-selector" class="form-label">1. Chọn File Epoch (.edf)</label>
                             <select class="form-select" id="file-selector">
@@ -242,6 +252,39 @@
                 }
             });
         }
+        const uploadPredictForm = document.getElementById('upload-predict-form');
+        const uploadPredictStatus = document.getElementById('upload-predict-status');
+
+        uploadPredictForm.addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const formData = new FormData(uploadPredictForm);
+            uploadPredictStatus.textContent = "⏳ Đang xử lý file EDF...";
+
+            try {
+                const res = await fetch("/upload-and-predict", {
+                    method: "POST",
+                    body: formData
+                });
+                const data = await res.json();
+
+                if (!res.ok || !data.success) {
+                    throw new Error(data.error || "Lỗi không xác định.");
+                }
+
+                currentSignalData = data.signals;
+                displayPredictionResults(data.prediction_results, data.ground_truth_key, data.ground_truth_full);
+                drawSignalChart(data.signals);
+
+                resultsPlaceholder.classList.add('hidden');
+                resultsContainer.classList.remove('hidden');
+                vizSection.classList.remove('hidden');
+                uploadPredictStatus.textContent = "✅ Xử lý thành công.";
+
+            } catch (err) {
+                uploadPredictStatus.textContent = `❌ Lỗi: ${err.message}`;
+            }
+        });
+
     </script>
 </body>
 </html>

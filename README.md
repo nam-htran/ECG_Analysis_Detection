@@ -103,8 +103,8 @@ The project employs two distinct architectures to process time-series data from 
 
 **Step 1: Clone the repository**
 ```bash
-git clone https://your-repository-link.git
-cd your-repository-directory
+git clone https://github.com/nam-htran/ECG_Analysis_Detection/
+cd ECG_Analysis_Detection
 ```
 
 **Step 2: Create a virtual environment (recommended)**

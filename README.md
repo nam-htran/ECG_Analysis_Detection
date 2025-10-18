@@ -1,142 +1,287 @@
-# Deep Learning-Based Sleep Stage Classification System
+# Hệ thống Phân loại Trạng thái Giấc ngủ sử dụng Deep Learning
 
-This project is a web application built with Flask that allows users to visualize and classify sleep stages from biological signal files (EDF). The system utilizes two advanced Deep Learning models, **Sleep Transformer** and **DeepSleepNet**, to predict sleep states (Wake, N1, N2, N3, REM) from three primary signal channels: EEG, EOG, and EMG.
+Dự án này là một ứng dụng web được xây dựng bằng Flask, cho phép người dùng trực quan hóa và phân loại các giai đoạn của giấc ngủ từ các file tín hiệu sinh học (EDF). Hệ thống sử dụng hai mô hình Deep Learning tiên tiến là **Sleep Transformer** và **DeepSleepNet** để dự đoán trạng thái giấc ngủ (Wake, N1, N2, N3, REM) từ ba kênh tín hiệu chính: EEG, EOG, và EMG.
 
-## Table of Contents
-- [Key Features](#key-features)
-- [Workflow](#workflow)
-- [Model Architecture](#model-architecture)
-- [Project Structure](#project-structure)
-- [Data Requirements](#data-requirements)
-- [Setup & Installation Guide](#setup--installation-guide)
-- [Technology Stack](#technology-stack)
+## Mục lục
+- [Tính năng nổi bật](#tính-năng-nổi-bật)
+- [Luồng hoạt động](#luồng-hoạt-động)
+- [Kiến trúc Mô hình](#kiến-trúc-mô-hình)
+- [Cấu trúc Dự án](#cấu-trúc-dán)
+- [Dữ liệu](#dữ-liệu)
+- [Hướng dẫn Cài đặt & Chạy ứng dụng](#hướng-dẫn-cài-đặt--chạy-ứng-dụng)
+- [Các công nghệ sử dụng](#các-công-nghệ-sử-dụng)
 
-## Key Features
+## Tính năng nổi bật
 
-- **Multi-Model Classification**: Integrates two powerful models (`MultiChannelSleepTransformer` and `MultiChannelDeepSleepNet`) for classification and result comparison.
-- **Signal Visualization**: Uses Chart.js to plot EEG, EOG, and EMG signals, allowing users to zoom and pan for detailed analysis.
-- **Flexible Interaction**:
-    - Provides a list of pre-loaded sample EDF files for quick analysis.
-    - Allows users to upload their own 30-second EDF files for instant prediction.
-- **Visual Comparison**: Automatically compares the AI's prediction results with the ground-truth label extracted from the filename, highlighting accuracy.
-- **User-Friendly Interface**: A modern, easy-to-use web interface built with Bootstrap.
+- **Phân loại Đa mô hình**: Tích hợp hai mô hình mạnh mẽ (`MultiChannelSleepTransformer` và `MultiChannelDeepSleepNet`) để phân loại và so sánh kết quả.
+- **Trực quan hóa Tín hiệu**: Sử dụng Chart.js để vẽ biểu đồ tín hiệu EEG, EOG, EMG, cho phép người dùng phóng to và di chuyển trên biểu đồ để phân tích chi tiết.
+- **Tương tác Linh hoạt**: 
+    - Cung cấp danh sách các file EDF mẫu có sẵn để người dùng lựa chọn và phân tích nhanh.
+    - Cho phép người dùng tải lên file EDF 30 giây của riêng mình để nhận dự đoán tức thì.
+- **So sánh Trực quan**: Tự động so sánh kết quả dự đoán của AI với nhãn gốc (ground-truth) được trích xuất từ tên file, làm nổi bật sự khác biệt và độ chính xác.
+- **Giao diện Thân thiện**: Giao diện web hiện đại, dễ sử dụng được xây dựng với Bootstrap.
 
-## Workflow
+## Luồng hoạt động
 
-1.  **File Selection/Upload**: The user can either select an existing EDF file from the `datasets` directory or upload a new file through the web interface.
-2.  **Backend Processing (Flask)**:
-    - `app.py` receives the request.
-    - The `mne` library is used to read and extract data from the three signal channels (`EEG Fpz-Cz`, `EOG horizontal`, `EMG submental`) from the EDF file.
-    - The data is preprocessed using Z-score normalization, mirroring the process used during model training.
-    - The normalized data is fed into the two pre-trained models (`model_transformer` and `model_deepsleepnet`).
-3.  **Prediction**: Both models output predictions for the five sleep stages. The backend calculates the probability distribution for each stage.
-4.  **Return Results to Frontend**:
-    - The backend sends a JSON response containing:
-        - The prediction results and probability distributions from both models.
-        - The ground-truth label extracted from the filename.
-        - The raw signal data for all three channels to be plotted.
-5.  **Display on Interface**:
-    - Client-side JavaScript dynamically updates the UI with the received data.
-    - Result cards are displayed for each model, comparing the prediction against the ground truth.
-    - Chart.js is used to render the 3-channel signal plot.
+1.  **Chọn/Tải file**: Người dùng có thể chọn một file EDF có sẵn từ thư mục `datasets` hoặc tải lên một file mới thông qua giao diện web.
+2.  **Xử lý Backend (Flask)**:
+    - `app.py` nhận yêu cầu.
+    - Sử dụng thư viện `mne` để đọc và trích xuất dữ liệu từ 3 kênh tín hiệu (`EEG Fpz-Cz`, `EOG horizontal`, `EMG submental`) trong file EDF.
+    - Dữ liệu được tiền xử lý bằng phương pháp chuẩn hóa Z-score, tương tự như trong quá trình huấn luyện mô hình.
+    - Dữ liệu đã chuẩn hóa được đưa vào hai mô hình đã được huấn luyện sẵn (`model_transformer` và `model_deepsleepnet`).
+3.  **Dự đoán**: Cả hai mô hình đều đưa ra dự đoán về 5 giai đoạn giấc ngủ. Backend sẽ tính toán xác suất cho mỗi giai đoạn.
+4.  **Trả kết quả về Frontend**:
+    - Backend gửi lại một gói tin JSON chứa kết quả dự đoán, phân phối xác suất, nhãn gốc và dữ liệu tín hiệu của 3 kênh.
+5.  **Hiển thị trên Giao diện**:
+    - JavaScript phía client nhận dữ liệu và cập nhật giao diện, hiển thị kết quả so sánh và vẽ biểu đồ tín hiệu bằng Chart.js.
 
-## Model Architecture
+## Kiến trúc Mô hình
 
-The project employs two distinct architectures to process time-series data from biological signals, both adapted to handle 3-channel inputs.
+Dự án sử dụng hai kiến trúc mô hình riêng biệt để xử lý dữ liệu chuỗi thời gian từ tín hiệu sinh học. Cả hai đều được điều chỉnh để làm việc với đầu vào 3 kênh.
 
-1.  **MultiChannelSleepTransformer (`model.py`)**:
-    - **Concept**: Leverages the Transformer architecture, highly successful in Natural Language Processing, to capture long-range dependencies within the sleep signals.
-    - **Structure**:
-        - Each channel (EEG, EOG, EMG) is processed by a separate Transformer branch.
-        - Within each branch, the signal is divided into "patches," which are embedded and combined with Positional Encoding.
-        - These embeddings are then passed through a Transformer Encoder.
-        - The output features from the three branches are concatenated and passed through a final classifier.
+### 1. MultiChannelSleepTransformer (`model.py`)
 
-2.  **MultiChannelDeepSleepNet (`model.py`)**:
-    - **Concept**: Based on the well-known DeepSleepNet architecture, which combines Convolutional Neural Networks (CNNs) for local feature extraction and Recurrent Neural Networks (LSTMs) for learning sequential relationships.
-    - **Structure**:
-        - Similar to the Transformer model, each channel is processed by its own DeepSleepNet branch.
-        - Each branch consists of two CNN streams with different kernel sizes to learn features at various frequencies.
-        - The output of the CNN layers is fed into a Bidirectional LSTM network.
-        - The final features from the three branches are concatenated and classified.
+- **Ý tưởng**: Sử dụng kiến trúc Transformer, vốn rất thành công trong xử lý ngôn ngữ tự nhiên, để nắm bắt các phụ thuộc dài hạn trong tín hiệu giấc ngủ.
+- **Cấu trúc**:
+    - Mỗi kênh (EEG, EOG, EMG) được xử lý bởi một nhánh Transformer riêng biệt.
+    - Trong mỗi nhánh, tín hiệu được chia thành các "patch" (đoạn nhỏ), được nhúng và thêm mã hóa vị trí (Positional Encoding).
+    - Các embedding này sau đó được đưa qua một bộ mã hóa Transformer (Transformer Encoder).
+    - Đặc trưng đầu ra từ ba nhánh được kết hợp (concatenate) và đưa qua một lớp phân loại (classifier) cuối cùng.
 
-## Project Structure
+**Sơ đồ kiến trúc trực quan:**
+```mermaid
+%%{
+  init: {
+    'fontFamily': 'Fira Code, monospace',
+    'theme': 'dark',
+    'flowchart': {
+      'htmlLabels': true,
+      'curve': 'basis'
+    }
+  }
+}%%
 
+graph LR
+    %% Định nghĩa các Style cho đẹp %%
+    classDef inputStyle fill:#0077b6,color:#fff,stroke:#000,stroke-width:2px
+    classDef branchStyle fill:#3d348b,color:#fff,stroke:#000,stroke-width:2px
+    classDef fusionStyle fill:#e07a5f,color:#fff,stroke:#000,stroke-width:2px
+    classDef outputStyle fill:#81b29a,color:#fff,stroke:#000,stroke-width:2px
+    
+    %% --- Cụm Input --- %%
+    subgraph 1. Inputs
+        direction TB
+        EEG("<i class='fa fa-wave-square'></i> EEG Signal")
+        EOG("<i class='fa fa-wave-square'></i> EOG Signal")
+        EMG("<i class='fa fa-wave-square'></i> EMG Signal")
+    end
+    class EEG,EOG,EMG inputStyle
+
+    %% --- Cụm các nhánh Transformer --- %%
+    subgraph 2. Transformer Branches
+        direction TB
+        subgraph EEG Branch
+            direction LR
+            EEG --> P1{{Patching}} --> E1[Linear Embedding] --> PE1[+ Positional Encoding] --> T1[Transformer Encoder] --> O1((EEG Embedding))
+        end
+        subgraph EOG Branch
+            direction LR
+            EOG --> P2{{Patching}} --> E2[Linear Embedding] --> PE2[+ Positional Encoding] --> T2[Transformer Encoder] --> O2((EOG Embedding))
+        end
+        subgraph EMG Branch
+            direction LR
+            EMG --> P3{{Patching}} --> E3[Linear Embedding] --> PE3[+ Positional Encoding] --> T3[Transformer Encoder] --> O3((EMG Embedding))
+        end
+    end
+    class T1,T2,T3,P1,P2,P3,E1,E2,E3,PE1,PE2,PE3 branchStyle
+
+    %% --- Cụm Fusion & Classifier --- %%
+    subgraph 3. Fusion & Classification
+        direction LR
+        F{Concatenate <br> Fused Embedding}
+        C[Classifier MLP]
+        
+        O1 --> F
+        O2 --> F
+        O3 --> F
+        F --> C
+    end
+    class F,C fusionStyle
+
+    %% --- Cụm Output --- %%
+    subgraph 4. Outputs
+        direction TB
+        W[Wake]
+        N1[N1]
+        N2[N2]
+        N3[N3]
+        REM[REM]
+    end
+    class W,N1,N2,N3,REM outputStyle
+
+    %% --- Nối các cụm lớn --- %%
+    C --> W & N1 & N2 & N3 & REM
+    
+    %% --- Làm nổi bật kết quả dự đoán --- %%
+    style N2 fill:#ffca3a,stroke:#c99a00,stroke-width:4px,color:#000
+```
+
+### 2. MultiChannelDeepSleepNet (`model.py`)
+
+- **Ý tưởng**: Dựa trên kiến trúc DeepSleepNet nổi tiếng, kết hợp cả mạng tích chập (CNN) để trích xuất đặc trưng cục bộ và mạng hồi quy (LSTM) để học các mối quan hệ tuần tự.
+- **Cấu trúc**:
+    - Tương tự như Transformer, mỗi kênh được xử lý bởi một nhánh DeepSleepNet riêng.
+    - Mỗi nhánh bao gồm hai luồng CNN với kích thước kernel khác nhau để học đặc trưng ở các tần số khác nhau (Low-Freq và High-Freq).
+    - Đầu ra của các lớp CNN được cộng lại và đưa vào một mạng LSTM hai chiều (Bidirectional LSTM).
+    - Đặc trưng cuối cùng từ ba nhánh được kết hợp và phân loại.
+
+**Sơ đồ kiến trúc trực quan:**```mermaid
+%%{
+  init: {
+    'fontFamily': 'Fira Code, monospace',
+    'theme': 'dark',
+    'flowchart': {
+      'htmlLabels': true,
+      'curve': 'basis'
+    }
+  }
+}%%
+
+graph LR
+    %% Định nghĩa các Style cho đẹp (giống như trên) %%
+    classDef inputStyle fill:#0077b6,color:#fff,stroke:#000,stroke-width:2px
+    classDef branchStyle fill:#3d348b,color:#fff,stroke:#000,stroke-width:2px
+    classDef fusionStyle fill:#e07a5f,color:#fff,stroke:#000,stroke-width:2px
+    classDef outputStyle fill:#81b29a,color:#fff,stroke:#000,stroke-width:2px
+
+    %% --- Cụm Input --- %%
+    subgraph 1. Inputs
+        direction TB
+        EEG("<i class='fa fa-wave-square'></i> EEG Signal")
+        EOG("<i class='fa fa-wave-square'></i> EOG Signal")
+        EMG("<i class='fa fa-wave-square'></i> EMG Signal")
+    end
+    class EEG,EOG,EMG inputStyle
+
+    %% --- Cụm các nhánh DeepSleepNet --- %%
+    subgraph 2. DeepSleepNet Branches
+        direction TB
+        subgraph EEG Branch
+            EEG --> CNN_L1[Low-Freq CNN] --> ADD1{+}
+            EEG --> CNN_H1[High-Freq CNN] --> ADD1
+            ADD1 --> LSTM1[Bidirectional LSTM] --> O1((EEG Embedding))
+        end
+        subgraph EOG Branch
+            EOG --> CNN_L2[Low-Freq CNN] --> ADD2{+}
+            EOG --> CNN_H2[High-Freq CNN] --> ADD2
+            ADD2 --> LSTM2[Bidirectional LSTM] --> O2((EOG Embedding))
+        end
+        subgraph EMG Branch
+            EMG --> CNN_L3[Low-Freq CNN] --> ADD3{+}
+            EMG --> CNN_H3[High-Freq CNN] --> ADD3
+            ADD3 --> LSTM3[Bidirectional LSTM] --> O3((EMG Embedding))
+        end
+    end
+    class CNN_L1,CNN_H1,CNN_L2,CNN_H2,CNN_L3,CNN_H3,ADD1,ADD2,ADD3,LSTM1,LSTM2,LSTM3 branchStyle
+
+    %% --- Cụm Fusion & Classifier --- %%
+    subgraph 3. Fusion & Classification
+        direction LR
+        F{Concatenate <br> Fused Embedding}
+        C[Classifier MLP]
+        
+        O1 --> F
+        O2 --> F
+        O3 --> F
+        F --> C
+    end
+    class F,C fusionStyle
+
+    %% --- Cụm Output --- %%
+    subgraph 4. Outputs
+        direction TB
+        W[Wake]
+        N1[N1]
+        N2[N2]
+        N3[N3]
+        REM[REM]
+    end
+    class W,N1,N2,N3,REM outputStyle
+
+    %% --- Nối các cụm lớn --- %%
+    C --> W & N1 & N2 & N3 & REM
+    
+    %% --- Làm nổi bật kết quả dự đoán --- %%
+    style N2 fill:#ffca3a,stroke:#c99a00,stroke-width:4px,color:#000
+```
+
+## Cấu trúc Dự án
 ```
 .
-├── app.py                      # Main Flask application file
-├── generate_demo.py            # Script to generate synthetic EDF data for demo purposes
-├── model.py                    # PyTorch model architecture definitions
-├── requirements.txt            # List of required Python libraries
-├── train.ipynb                 # (Optional) Jupyter Notebook for the training process
-├── datasets/                   # Directory containing sample EDF files
-│   ├── SC4032E_epoch_000_label_W.edf
+├── app.py                      # File chính của ứng dụng Flask
+├── generate_demo.py            # Script để tạo dữ liệu EDF giả lập cho demo
+├── model.py                    # Định nghĩa kiến trúc các mô hình PyTorch
+├── requirements.txt            # Danh sách các thư viện Python cần thiết
+├── datasets/                   # Thư mục chứa các file EDF mẫu
 │   └── ...
-├── model_weights/              # Directory for pre-trained model weights
+├── model_weights/              # Thư mục chứa các trọng số đã huấn luyện
 │   ├── MultiChannelDeepSleepNet_best.pt
 │   └── MultiChannelSleepTransformer_best.pt
 ├── static/
 │   └── css/
-│       └── style.css           # Custom CSS file
+│       └── style.css           # File CSS tùy chỉnh
 └── templates/
-    ├── index.html              # Main HTML template for the UI
-    └── ecg.html                # (Optional) Template for another feature
+    └── index.html              # Template giao diện chính
 ```
 
-## Data Requirements
+## Dữ liệu
 
-- **Format**: The system requires input files in **EDF (European Data Format)**.
-- **File Structure**: Each EDF file must be a 30-second *epoch* containing at least the following three channels:
+- **Định dạng**: Hệ thống yêu cầu đầu vào là các file **EDF (European Data Format)**.
+- **Cấu trúc mỗi file**: Mỗi file EDF phải là một *epoch* (đoạn) dài 30 giây, chứa ít nhất 3 kênh tín hiệu sau:
     - `EEG Fpz-Cz`
     - `EOG horizontal`
     - `EMG submental`
-- **Sampling Frequency**: The models were trained on data with a sampling frequency of **100 Hz**.
-- **Sample Data Generation**: You can run the `generate_demo.py` script to create a demo dataset with simulated signal characteristics for each sleep stage.
+- **Tần số lấy mẫu**: Các mô hình được huấn luyện với dữ liệu có tần số lấy mẫu là **100 Hz**.
+- **Tạo dữ liệu mẫu**: Bạn có thể chạy script `generate_demo.py` để tự tạo ra một bộ dữ liệu demo.
   ```bash
   python generate_demo.py
   ```
-  This command will create a `generated_full_demo_dataset` directory containing 5 sample EDF files.
 
-## Setup & Installation Guide
+## Hướng dẫn Cài đặt & Chạy ứng dụng
 
-**Prerequisites**: Python 3.8+ and pip.
+**Yêu cầu**: Python 3.8+ và pip.
 
-**Step 1: Clone the repository**
+**Bước 1: Clone repository**
 ```bash
-git clone https://github.com/nam-htran/ECG_Analysis_Detection/
+git clone https://github.com/nam-htran/ECG_Analysis_Detection
 cd ECG_Analysis_Detection
 ```
 
-**Step 2: Create a virtual environment (recommended)**
+**Bước 2: Tạo môi trường ảo (khuyến khích)**
 ```bash
-# For macOS/Linux
-python3 -m venv venv
-source venv/bin/activate
-
-# For Windows
 python -m venv venv
-venv\Scripts\activate
+source venv/bin/activate   # Trên Windows: venv\Scripts\activate
 ```
 
-**Step 3: Install the required libraries**
+**Bước 3: Cài đặt các thư viện cần thiết**
 ```bash
 pip install -r requirements.txt
 ```
 
-**Step 4: Prepare data and model weights**
-- Ensure you have the `datasets` directory populated with sample EDF files.
-- Ensure you have the `model_weights` directory containing the pre-trained `.pt` weight files.
+**Bước 4: Chuẩn bị dữ liệu và trọng số**
+- Đảm bảo bạn có thư mục `datasets` chứa các file EDF mẫu.
+- Đảm bảo bạn có thư mục `model_weights` chứa các file trọng số `.pt` đã được huấn luyện.
 
-**Step 5: Run the Flask application**
+**Bước 5: Chạy ứng dụng Flask**
 ```bash
 python app.py
 ```
 
-**Step 6: Access the application**
-Open your web browser and navigate to: `http://127.0.0.1:5000`
+**Bước 6: Truy cập ứng dụng**
+Mở trình duyệt web và truy cập vào địa chỉ: `http://127.0.0.1:5000`
 
-## Technology Stack
+## Các công nghệ sử dụng
 
 - **Backend**: Flask, PyTorch, MNE-Python, NumPy
-- **Frontend**: HTML5, CSS3, Bootstrap 5, JavaScript, Chart.js, chartjs-plugin-zoom
-- **AI Models**: Transformer, CNN, LSTM
+- **Frontend**: HTML5, CSS3, Bootstrap 5, JavaScript, Chart.js
+- **Trực quan hóa Kiến trúc**: Mermaid.js
